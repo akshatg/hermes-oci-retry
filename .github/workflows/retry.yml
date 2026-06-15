@@ -1,0 +1,25 @@
+name: OCI A1 Instance Retry
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'  # Every 5 minutes
+  workflow_dispatch:         # Allow manual trigger
+
+jobs:
+  retry:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Try Create OCI Instance
+        run: |
+          curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh | bash -s -- --accept-all-defaults
+          export PATH="$HOME/bin:$PATH"
+          oci compute instance launch \
+            --compartment-id "${{ secrets.COMPARTMENT_ID }}" \
+            --availability-domain "${{ secrets.AD }}" \
+            --display-name "hermes-agent" \
+            --image-id "${{ secrets.IMAGE_ID }}" \
+            --subnet-id "${{ secrets.SUBNET_ID }}" \
+            --shape "VM.Standard.A1.Flex" \
+            --shape-config '{"ocpus": 1, "memoryInGBs": 6}' \
+            --ssh-authorized-keys-file ~/.ssh/id_rsa.pub \
+            --assign-public-ip true
