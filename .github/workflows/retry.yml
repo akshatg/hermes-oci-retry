@@ -1,4 +1,4 @@
-name: OCI A1 Instance Retry
+name: OCI A1 Instance Retry (active)
 
 on:
   schedule:
