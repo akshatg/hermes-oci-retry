@@ -2,24 +2,87 @@ name: OCI A1 Instance Retry
 
 on:
   schedule:
-    - cron: '*/5 * * * *'  # Every 5 minutes
-  workflow_dispatch:         # Allow manual trigger
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
 
 jobs:
   retry:
     runs-on: ubuntu-latest
     steps:
-      - name: Try Create OCI Instance
+      - name: Install OCI CLI
         run: |
           curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh | bash -s -- --accept-all-defaults
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Configure OCI CLI
+        env:
+          OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.oci
+          echo "$OCI_PRIVATE_KEY" > ~/.oci/oci_api_key.pem
+          chmod 600 ~/.oci/oci_api_key.pem
+          cat > ~/.oci/config << CONFIGEOF
+          [DEFAULT]
+          user=${{ secrets.OCI_USER_ID }}
+          fingerprint=${{ secrets.OCI_FINGERPRINT }}
+          tenancy=${{ secrets.OCI_TENANCY_ID }}
+          region=${{ secrets.OCI_REGION }}
+          key_file=~/.oci/oci_api_key.pem
+          CONFIGEOF
+
+      - name: Write SSH Key
+        env:
+          SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_PUBLIC_KEY" > ~/.ssh/id_rsa.pub
+          chmod 600 ~/.ssh/id_rsa.pub
+
+      - name: Check if instance exists
+        id: check
+        run: |
           export PATH="$HOME/bin:$PATH"
-          oci compute instance launch \
+          oci setup repair-file-permissions --file ~/.oci/oci_api_key.pem
+          EXISTS=$(oci compute instance list \
             --compartment-id "${{ secrets.COMPARTMENT_ID }}" \
-            --availability-domain "${{ secrets.AD }}" \
-            --display-name "hermes-agent" \
-            --image-id "${{ secrets.IMAGE_ID }}" \
-            --subnet-id "${{ secrets.SUBNET_ID }}" \
-            --shape "VM.Standard.A1.Flex" \
-            --shape-config '{"ocpus": 1, "memoryInGBs": 6}' \
-            --ssh-authorized-keys-file ~/.ssh/id_rsa.pub \
-            --assign-public-ip true
+            --all \
+            --query "data[?\"display-name\"=='hermes-agent' && \"lifecycle-state\"!='TERMINATED'].id | [0]" \
+            --raw-output 2>/dev/null)
+          if [ -n "$EXISTS" ] && [ "$EXISTS" != "null" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "✅ Instance already exists: $EXISTS"
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Try Create Instance
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          export PATH="$HOME/bin:$PATH"
+          ADs=("JuIC:US-ASHBURN-AD-1" "JuIC:US-ASHBURN-AD-2" "JuIC:US-ASHBURN-AD-3")
+          for AD in "${ADs[@]}"; do
+            echo "⏳ Trying $AD..."
+            RESULT=$(oci compute instance launch \
+              --compartment-id "${{ secrets.COMPARTMENT_ID }}" \
+              --availability-domain "$AD" \
+              --display-name "hermes-agent" \
+              --image-id "${{ secrets.IMAGE_ID }}" \
+              --subnet-id "${{ secrets.SUBNET_ID }}" \
+              --shape "VM.Standard.A1.Flex" \
+              --shape-config '{"ocpus":1,"memoryInGBs":6}' \
+              --ssh-authorized-keys-file ~/.ssh/id_rsa.pub \
+              --assign-public-ip true 2>&1)
+            if echo "$RESULT" | grep -qi "provisioning\|running"; then
+              echo "✅ SUCCESS! Created in $AD"
+              echo "$RESULT"
+              exit 0
+            elif echo "$RESULT" | grep -qi "out of host capacity"; then
+              echo "❌ No capacity in $AD"
+            elif echo "$RESULT" | grep -qi "limitexceeded"; then
+              echo "⚠️ Limit reached in $AD"
+            else
+              echo "❌ Error: $RESULT"
+              exit 1
+            fi
+          done
+          echo "⚠️ All ADs out of capacity. Retrying next time."
