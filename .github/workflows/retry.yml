@@ -42,7 +42,6 @@ jobs:
         id: check
         run: |
           export PATH="$HOME/bin:$PATH"
-          oci setup repair-file-permissions --file ~/.oci/oci_api_key.pem
           EXISTS=$(oci compute instance list \
             --compartment-id "${{ secrets.COMPARTMENT_ID }}" \
             --all \
